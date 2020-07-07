@@ -36,7 +36,7 @@ impl APDUTransport {
     pub async fn exchange(&self, command: &APDUCommand) -> Result<APDUAnswer, TransportError> {
         let call = self
             .transport_wrapper
-            .exchange(command, None)
+            .exchange(command)
             .map_err(|_| APDUExchangeError)?;
 
         future::ready(Ok(call)).await
