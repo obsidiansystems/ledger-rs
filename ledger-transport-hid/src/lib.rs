@@ -26,6 +26,7 @@ use lazy_static::lazy_static;
 use ledger_apdu::{map_apdu_error_description, APDUAnswer, APDUCommand, APDUErrorCodes};
 use log::debug;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::CStr;
 use std::io::Cursor;
 use std::sync::{Arc, Mutex, Weak};
@@ -85,7 +86,7 @@ struct HidApiWrapper {
 #[allow(dead_code)]
 pub struct TransportNativeHID {
     api_mutex: Arc<Mutex<hidapi::HidApi>>,
-    device: HidDevice,
+    devices: HashMap<String, HidDevice>,
     device_mutex: Mutex<i32>,
 }
 
@@ -119,6 +120,7 @@ impl HidApiWrapper {
 
 impl TransportNativeHID {
     #[cfg(not(target_os = "linux"))]
+    #[allow(dead_code)]
     fn find_ledger_device_path(api: &hidapi::HidApi) -> Result<&CStr, LedgerError> {
         for device in api.device_list() {
             if device.vendor_id() == LEDGER_VID && device.usage_page() == LEDGER_USAGE_PAGE {
@@ -129,6 +131,7 @@ impl TransportNativeHID {
     }
 
     #[cfg(target_os = "linux")]
+    #[allow(dead_code)]
     fn find_ledger_device_path(api: &hidapi::HidApi) -> Result<&CStr, LedgerError> {
         for device in api.device_list() {
             if device.vendor_id() == LEDGER_VID {
@@ -141,8 +144,7 @@ impl TransportNativeHID {
         Err(LedgerError::DeviceNotFound)
     }
 
-    //--------------------------------------------------
-    #[cfg (not(target_os = "linux"))]
+    #[cfg(not(target_os = "linux"))]
     fn device_filter_os_impl(device: &hidapi::DeviceInfo) -> bool {
         return device.usage_page() == LEDGER_USAGE_PAGE;
     }
@@ -150,24 +152,33 @@ impl TransportNativeHID {
     #[cfg(target_os = "linux")]
     fn device_filter_os_impl(device: &hidapi::DeviceInfo) -> bool {
         match get_usage_page(&device.path()) {
-            Ok(usage_page) => { return usage_page == LEDGER_USAGE_PAGE; }
+            Ok(usage_page) => {
+                return usage_page == LEDGER_USAGE_PAGE;
+            }
             // Probably shouldn't treat an error as false
-            Err(_) => { return false; }
+            Err(_) => {
+                return false;
+            }
         };
     }
 
     fn device_filter(device: &hidapi::DeviceInfo) -> bool {
-        return device.vendor_id() == LEDGER_VID &&
-            TransportNativeHID::device_filter_os_impl(&device);
+        return device.vendor_id() == LEDGER_VID
+            && TransportNativeHID::device_filter_os_impl(&device);
     }
 
-    fn find_all_ledger_device_paths(api: &hidapi::HidApi) -> Result<&CStr, LedgerError> {
+    fn find_all_ledger_device_paths(api: &hidapi::HidApi) -> Result<Vec<&CStr>, LedgerError> {
+        let mut result = Vec::new();
         for device in api.device_list() {
             if TransportNativeHID::device_filter(device) {
-                return Ok(device.path());
+                result.push(device.path());
             }
         }
-        Err(LedgerError::DeviceNotFound)
+        if result.is_empty() {
+            return Err(LedgerError::DeviceNotFound);
+        } else {
+            return Ok(result);
+        }
     }
 
     pub fn new() -> Result<Self, LedgerError> {
@@ -175,19 +186,47 @@ impl TransportNativeHID {
         let api_mutex = apiwrapper.get().expect("Error getting api_mutex");
         let api = api_mutex.lock().expect("Could not lock");
 
-        let device_path = TransportNativeHID::find_ledger_device_path(&api)?;
-        let device = api.open_path(&device_path)?;
-
-        let ledger = TransportNativeHID {
-            device,
+        let device_paths = TransportNativeHID::find_all_ledger_device_paths(&api)?;
+        let mut devices = HashMap::new();
+        for path in device_paths {
+            let device = api.open_path(&path)?;
+            let path_str = path.clone().to_str().map(|a| String::from(a))?;
+            devices.insert(path_str, device);
+        }
+        let ledgers = TransportNativeHID {
+            devices,
             device_mutex: Mutex::new(0),
             api_mutex: api_mutex.clone(),
         };
 
-        Ok(ledger)
+        Ok(ledgers)
     }
 
-    fn write_apdu(&self, channel: u16, apdu_command: &[u8]) -> Result<i32, LedgerError> {
+    fn retrieve_device_with_path(
+        &self,
+        path_opt: &Option<String>,
+    ) -> Result<&HidDevice, LedgerError> {
+        if let Some(path) = path_opt {
+            match self.devices.get(path) {
+                Some(device) => return Ok(device),
+                None => return Err(LedgerError::DeviceNotFound),
+            }
+        } else {
+            // Just get the first ledger in the map
+            return self
+                .devices
+                .values()
+                .next()
+                .ok_or(LedgerError::DeviceNotFound);
+        }
+    }
+
+    fn write_apdu(
+        &self,
+        channel: u16,
+        apdu_command: &[u8],
+        path: &Option<String>,
+    ) -> Result<i32, LedgerError> {
         let command_length = apdu_command.len() as usize;
         let mut in_data = Vec::with_capacity(command_length + 2);
         in_data.push(((command_length >> 8) & 0xFF) as u8);
@@ -209,7 +248,8 @@ impl TransportNativeHID {
 
             debug!("[{:3}] << {:}", buffer.len(), hex::encode(&buffer));
 
-            let result = self.device.write(&buffer);
+            let device = TransportNativeHID::retrieve_device_with_path(self, &path)?;
+            let result = device.write(&buffer);
 
             match result {
                 Ok(size) => {
@@ -225,13 +265,19 @@ impl TransportNativeHID {
         Ok(1)
     }
 
-    fn read_apdu(&self, _channel: u16, apdu_answer: &mut Vec<u8>) -> Result<usize, LedgerError> {
+    fn read_apdu(
+        &self,
+        _channel: u16,
+        apdu_answer: &mut Vec<u8>,
+        path: &Option<String>,
+    ) -> Result<usize, LedgerError> {
         let mut buffer = vec![0u8; LEDGER_PACKET_SIZE as usize];
         let mut sequence_idx = 0u16;
         let mut expected_apdu_len = 0usize;
+        let device = TransportNativeHID::retrieve_device_with_path(self, &path)?;
 
         loop {
-            let res = self.device.read_timeout(&mut buffer, LEDGER_TIMEOUT)?;
+            let res = device.read_timeout(&mut buffer, LEDGER_TIMEOUT)?;
 
             if (sequence_idx == 0 && res < 7) || res < 5 {
                 return Err(LedgerError::Comm("Read error. Incomplete header"));
@@ -277,13 +323,17 @@ impl TransportNativeHID {
         }
     }
 
-    pub fn exchange(&self, command: &APDUCommand) -> Result<APDUAnswer, LedgerError> {
+    pub fn exchange(
+        &self,
+        command: &APDUCommand,
+        path: Option<String>,
+    ) -> Result<APDUAnswer, LedgerError> {
         let _guard = self.device_mutex.lock().unwrap();
 
-        self.write_apdu(LEDGER_CHANNEL, &command.serialize())?;
+        self.write_apdu(LEDGER_CHANNEL, &command.serialize(), &path)?;
 
         let mut answer: Vec<u8> = Vec::with_capacity(256);
-        let res = self.read_apdu(LEDGER_CHANNEL, &mut answer)?;
+        let res = self.read_apdu(LEDGER_CHANNEL, &mut answer, &path)?;
 
         if res < 2 {
             return Err(LedgerError::Comm("response was too short"));
