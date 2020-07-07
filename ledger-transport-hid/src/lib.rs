@@ -141,6 +141,35 @@ impl TransportNativeHID {
         Err(LedgerError::DeviceNotFound)
     }
 
+    //--------------------------------------------------
+    #[cfg (not(target_os = "linux"))]
+    fn device_filter_os_impl(device: &hidapi::DeviceInfo) -> bool {
+        return device.usage_page() == LEDGER_USAGE_PAGE;
+    }
+
+    #[cfg(target_os = "linux")]
+    fn device_filter_os_impl(device: &hidapi::DeviceInfo) -> bool {
+        match get_usage_page(&device.path()) {
+            Ok(usage_page) => { return usage_page == LEDGER_USAGE_PAGE; }
+            // Probably shouldn't treat an error as false
+            Err(_) => { return false; }
+        };
+    }
+
+    fn device_filter(device: &hidapi::DeviceInfo) -> bool {
+        return device.vendor_id() == LEDGER_VID &&
+            TransportNativeHID::device_filter_os_impl(&device);
+    }
+
+    fn find_all_ledger_device_paths(api: &hidapi::HidApi) -> Result<&CStr, LedgerError> {
+        for device in api.device_list() {
+            if TransportNativeHID::device_filter(device) {
+                return Ok(device.path());
+            }
+        }
+        Err(LedgerError::DeviceNotFound)
+    }
+
     pub fn new() -> Result<Self, LedgerError> {
         let apiwrapper = HIDAPIWRAPPER.lock().expect("Could not lock api wrapper");
         let api_mutex = apiwrapper.get().expect("Error getting api_mutex");
