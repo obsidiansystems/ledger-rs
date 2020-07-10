@@ -87,6 +87,7 @@ pub struct TransportNativeHID {
     api_mutex: Arc<Mutex<hidapi::HidApi>>,
     device: HidDevice,
     device_mutex: Mutex<i32>,
+    hid_path : String
 }
 
 unsafe impl Send for HidApiWrapper {}
@@ -117,6 +118,80 @@ impl HidApiWrapper {
     }
 }
 
+// Checks whether a ledger on a certain path exists
+pub fn heartbeat(path: String) -> Result<bool, LedgerError> {
+    let apiwrapper = HIDAPIWRAPPER.lock().expect("Could not lock api wrapper");
+    let api_mutex = apiwrapper.get().expect("Error getting api_mutex");
+    let mut api = api_mutex.lock().expect("Could not lock");
+    let _ = api.refresh_devices()?;
+    let device_paths = find_all_ledger_device_paths(&api, vec![])?;
+    for p in device_paths {
+        let dev_path = p.clone().to_str().unwrap().to_owned();
+        if dev_path == path {
+            return Ok(true);
+        }
+    }
+    return Ok(false);
+}
+
+pub fn get_all_ledgers(paths_to_ignore: Vec<String>) -> Result<Vec<TransportNativeHID>, LedgerError> {
+    let apiwrapper = HIDAPIWRAPPER.lock().expect("Could not lock api wrapper");
+    let api_mutex = apiwrapper.get().expect("Error getting api_mutex");
+    let mut api = api_mutex.lock().expect("Could not lock");
+    let _ = api.refresh_devices()?;
+
+    // Ignore the path, if the caller claims it already has a handle for that path
+    let device_paths = find_all_ledger_device_paths(&api, paths_to_ignore)?;
+    println!("ALL PATHS< PRIOR TO LOOP {:?}", device_paths);
+    let mut ledgers = Vec::new();
+    for path in device_paths {
+        let device = api.open_path(&path)?;
+        let ledger = TransportNativeHID {
+            device,
+            device_mutex: Mutex::new(0),
+            api_mutex: api_mutex.clone(),
+            hid_path: path.clone().to_str().unwrap().to_owned(),
+        };
+        ledgers.push(ledger);
+    }
+    Ok(ledgers)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn device_filter_os_impl(device: &hidapi::DeviceInfo) -> bool {
+    return device.usage_page() == LEDGER_USAGE_PAGE;
+}
+
+#[cfg(target_os = "linux")]
+fn device_filter_os_impl(device: &hidapi::DeviceInfo) -> bool {
+    let path = device.path();
+    match get_usage_page(&path) {
+        Ok(usage_page) => {
+            return usage_page == LEDGER_USAGE_PAGE;
+        }
+        Err(_) => {
+            return false;
+        }
+    };
+}
+
+fn device_filter(device: &hidapi::DeviceInfo) -> bool {
+    return (device.vendor_id() == LEDGER_VID) && device_filter_os_impl(&device);
+}
+
+fn find_all_ledger_device_paths(api: &hidapi::HidApi, to_ignore: Vec<String>) -> Result<Vec<&CStr>, LedgerError> {
+    let mut result = Vec::new();
+    for device in api.device_list() {
+        if device_filter(device) {
+            let path = device.path().to_str()?;
+            if !to_ignore.contains(&path.to_owned()) {
+                result.push(device.path());
+            }
+        }
+    }
+    return Ok(result);
+}
+
 impl TransportNativeHID {
     #[cfg(not(target_os = "linux"))]
     fn find_ledger_device_path(api: &hidapi::HidApi) -> Result<&CStr, LedgerError> {
@@ -141,6 +216,10 @@ impl TransportNativeHID {
         Err(LedgerError::DeviceNotFound)
     }
 
+    pub fn hid_path(&self) -> String {
+        return self.hid_path.clone();
+    }
+
     pub fn new() -> Result<Self, LedgerError> {
         let apiwrapper = HIDAPIWRAPPER.lock().expect("Could not lock api wrapper");
         let api_mutex = apiwrapper.get().expect("Error getting api_mutex");
@@ -153,6 +232,7 @@ impl TransportNativeHID {
             device,
             device_mutex: Mutex::new(0),
             api_mutex: api_mutex.clone(),
+            hid_path: device_path.clone().to_str().unwrap().to_owned(),
         };
 
         Ok(ledger)
