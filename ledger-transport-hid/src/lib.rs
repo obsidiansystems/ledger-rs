@@ -142,7 +142,6 @@ pub fn get_all_ledgers(paths_to_ignore: Vec<String>) -> Result<Vec<TransportNati
 
     // Ignore the path, if the caller claims it already has a handle for that path
     let device_paths = find_all_ledger_device_paths(&api, paths_to_ignore)?;
-    println!("ALL PATHS< PRIOR TO LOOP {:?}", device_paths);
     let mut ledgers = Vec::new();
     for path in device_paths {
         let device = api.open_path(&path)?;
@@ -193,49 +192,9 @@ fn find_all_ledger_device_paths(api: &hidapi::HidApi, to_ignore: Vec<String>) ->
 }
 
 impl TransportNativeHID {
-    #[cfg(not(target_os = "linux"))]
-    fn find_ledger_device_path(api: &hidapi::HidApi) -> Result<&CStr, LedgerError> {
-        for device in api.device_list() {
-            if device.vendor_id() == LEDGER_VID && device.usage_page() == LEDGER_USAGE_PAGE {
-                return Ok(device.path());
-            }
-        }
-        Err(LedgerError::DeviceNotFound)
-    }
-
-    #[cfg(target_os = "linux")]
-    fn find_ledger_device_path(api: &hidapi::HidApi) -> Result<&CStr, LedgerError> {
-        for device in api.device_list() {
-            if device.vendor_id() == LEDGER_VID {
-                let usage_page = get_usage_page(&device.path())?;
-                if usage_page == LEDGER_USAGE_PAGE {
-                    return Ok(device.path());
-                }
-            }
-        }
-        Err(LedgerError::DeviceNotFound)
-    }
 
     pub fn hid_path(&self) -> String {
         return self.hid_path.clone();
-    }
-
-    pub fn new() -> Result<Self, LedgerError> {
-        let apiwrapper = HIDAPIWRAPPER.lock().expect("Could not lock api wrapper");
-        let api_mutex = apiwrapper.get().expect("Error getting api_mutex");
-        let api = api_mutex.lock().expect("Could not lock");
-
-        let device_path = TransportNativeHID::find_ledger_device_path(&api)?;
-        let device = api.open_path(&device_path)?;
-
-        let ledger = TransportNativeHID {
-            device,
-            device_mutex: Mutex::new(0),
-            api_mutex: api_mutex.clone(),
-            hid_path: device_path.clone().to_str().unwrap().to_owned(),
-        };
-
-        Ok(ledger)
     }
 
     fn write_apdu(&self, channel: u16, apdu_command: &[u8]) -> Result<i32, LedgerError> {
