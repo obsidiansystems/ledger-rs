@@ -50,7 +50,7 @@ const LEDGER_VID: u16 = 0x2c97;
 const LEDGER_USAGE_PAGE: u16 = 0xFFA0;
 const LEDGER_CHANNEL: u16 = 0x0101;
 const LEDGER_PACKET_SIZE: u8 = 64;
-const LEDGER_TIMEOUT: i32 = 10_000_000;
+const LEDGER_TIMEOUT: i32 = 2_000;
 
 #[derive(Error, Debug)]
 pub enum LedgerError {
