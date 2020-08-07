@@ -50,7 +50,7 @@ const LEDGER_VID: u16 = 0x2c97;
 const LEDGER_USAGE_PAGE: u16 = 0xFFA0;
 const LEDGER_CHANNEL: u16 = 0x0101;
 const LEDGER_PACKET_SIZE: u8 = 64;
-const LEDGER_TIMEOUT: i32 = 2_000;
+const LEDGER_TIMEOUT: i32 = 10_000_000;
 
 #[derive(Error, Debug)]
 pub enum LedgerError {
@@ -235,13 +235,14 @@ impl TransportNativeHID {
         Ok(1)
     }
 
-    fn read_apdu(&self, _channel: u16, apdu_answer: &mut Vec<u8>) -> Result<usize, LedgerError> {
+    fn read_apdu(&self, _channel: u16, apdu_answer: &mut Vec<u8>, timeout: Option<i32>) -> Result<usize, LedgerError> {
+        let timeout = timeout.unwrap_or(LEDGER_TIMEOUT);
         let mut buffer = vec![0u8; LEDGER_PACKET_SIZE as usize];
         let mut sequence_idx = 0u16;
         let mut expected_apdu_len = 0usize;
 
         loop {
-            let res = self.device.read_timeout(&mut buffer, LEDGER_TIMEOUT)?;
+            let res = self.device.read_timeout(&mut buffer, timeout)?;
 
             if (sequence_idx == 0 && res < 7) || res < 5 {
                 return Err(LedgerError::Comm("Read error. Incomplete header"));
@@ -287,13 +288,13 @@ impl TransportNativeHID {
         }
     }
 
-    pub fn exchange(&self, command: &APDUCommand) -> Result<APDUAnswer, LedgerError> {
+    pub fn exchange(&self, command: &APDUCommand, timeout: Option<i32>) -> Result<APDUAnswer, LedgerError> {
         let _guard = self.device_mutex.lock().unwrap();
 
         self.write_apdu(LEDGER_CHANNEL, &command.serialize())?;
 
         let mut answer: Vec<u8> = Vec::with_capacity(256);
-        let res = self.read_apdu(LEDGER_CHANNEL, &mut answer)?;
+        let res = self.read_apdu(LEDGER_CHANNEL, &mut answer, timeout)?;
 
         if res < 2 {
             return Err(LedgerError::Comm("response was too short"));
@@ -479,7 +480,7 @@ mod integration_tests {
             data: Vec::new(),
         };
 
-        let result = ledger.exchange(&command).expect("Error during exchange");
+        let result = ledger.exchange(&command, None).expect("Error during exchange");
         debug!("{:?}", result);
     }
 }
