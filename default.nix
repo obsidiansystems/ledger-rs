@@ -9,6 +9,7 @@ pkgs.rustPlatform.buildRustPackage {
   verifyCargoDeps = false;
 
   # Cargo hash must be updated when Cargo.lock file changes.
-  cargoSha256 = "08vz4nx25rrqnc7plzzv12bxvvl6d5lvzcnkvq2haw1r5rw41irm";
+  # cargoSha256 = pkgs.lib.fakeSha256;
+  cargoSha256 = "0kccfnqvd4bbk6zl6y3p4s40qjn01yqrbfg6d13c95l92crcxwxf";
 }
 
