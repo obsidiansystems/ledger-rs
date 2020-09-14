@@ -3,7 +3,8 @@ members = [
     "ledger-apdu",
     "ledger-transport",
     "ledger-transport-hid",
-    "ledger-zondax-generic"
+    "ledger-zondax-generic",
+    "ledger-playground"
 ]
 
 exclude = [

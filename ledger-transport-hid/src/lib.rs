@@ -82,14 +82,6 @@ struct HidApiWrapper {
     _api: RefCell<Weak<Mutex<hidapi::HidApi>>>,
 }
 
-#[allow(dead_code)]
-pub struct TransportNativeHID {
-    api_mutex: Arc<Mutex<hidapi::HidApi>>,
-    device: HidDevice,
-    device_mutex: Mutex<i32>,
-    hid_path : String
-}
-
 unsafe impl Send for HidApiWrapper {}
 
 lazy_static! {
@@ -118,42 +110,56 @@ impl HidApiWrapper {
     }
 }
 
-// Checks whether a ledger on a certain path exists
-pub fn heartbeat(path: String) -> Result<bool, LedgerError> {
+
+pub fn with_ledgers<Action>(action: &mut Action) -> Result<(), LedgerError>
+    where
+        Action: FnMut(TransportNativeHID) -> Result<(), LedgerError>
+{
     let apiwrapper = HIDAPIWRAPPER.lock().expect("Could not lock api wrapper");
     let api_mutex = apiwrapper.get().expect("Error getting api_mutex");
     let mut api = api_mutex.lock().expect("Could not lock");
     let _ = api.refresh_devices()?;
-    let device_paths = find_all_ledger_device_paths(&api, vec![])?;
-    for p in device_paths {
-        let dev_path = p.clone().to_str().unwrap().to_owned();
-        if dev_path == path {
-            return Ok(true);
-        }
-    }
-    return Ok(false);
-}
-
-pub fn get_all_ledgers(paths_to_ignore: Vec<String>) -> Result<Vec<TransportNativeHID>, LedgerError> {
-    let apiwrapper = HIDAPIWRAPPER.lock().expect("Could not lock api wrapper");
-    let api_mutex = apiwrapper.get().expect("Error getting api_mutex");
-    let mut api = api_mutex.lock().expect("Could not lock");
-    let _ = api.refresh_devices()?;
-
-    // Ignore the path, if the caller claims it already has a handle for that path
-    let device_paths = find_all_ledger_device_paths(&api, paths_to_ignore)?;
-    let mut ledgers = Vec::new();
+    let device_paths = find_all_ledger_device_paths(&api);
     for path in device_paths {
         let device = api.open_path(&path)?;
         let ledger = TransportNativeHID {
-            device,
+            device: device,
             device_mutex: Mutex::new(0),
-            api_mutex: api_mutex.clone(),
-            hid_path: path.clone().to_str().unwrap().to_owned(),
         };
-        ledgers.push(ledger);
+        let _ = action(ledger)?;
     }
-    Ok(ledgers)
+    return Ok(());
+        
+}
+pub fn with_ledgers_select<Filter, Action, T, E>(filter: Filter, action: &mut Action) -> Result<T, E>
+    where
+        Filter: Fn(&mut TransportNativeHID) -> bool,
+        Action: FnMut(TransportNativeHID) -> Result<T, E>,
+        E: From<LedgerError>
+{
+    let apiwrapper = HIDAPIWRAPPER.lock().expect("Could not lock api wrapper");
+    let api_mutex = apiwrapper.get().expect("Error getting api_mutex");
+    let mut api = api_mutex.lock().expect("Could not lock");
+    let _ = api.refresh_devices().map_err(|e| LedgerError::from(e));
+    let device_paths = find_all_ledger_device_paths(&api);
+
+    let mut desired = None;
+    for path in device_paths {
+        let device = api.open_path(&path).map_err(|e| LedgerError::from(e))?;
+        let mut ledger = TransportNativeHID {
+            device: device,
+            device_mutex: Mutex::new(0),
+        };
+        if filter(&mut ledger) {
+            desired = Some(ledger);
+        }
+    }
+    if let Some(x) = desired {
+        return action(x);
+    }
+    else {
+        return Err(E::from(LedgerError::DeviceNotFound))
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -178,24 +184,24 @@ fn device_filter(device: &hidapi::DeviceInfo) -> bool {
     return (device.vendor_id() == LEDGER_VID) && device_filter_os_impl(&device);
 }
 
-fn find_all_ledger_device_paths(api: &hidapi::HidApi, to_ignore: Vec<String>) -> Result<Vec<&CStr>, LedgerError> {
+fn find_all_ledger_device_paths(api: &hidapi::HidApi) -> Vec<&CStr> {
     let mut result = Vec::new();
     for device in api.device_list() {
         if device_filter(device) {
-            let path = device.path().to_str()?;
-            if !to_ignore.contains(&path.to_owned()) {
-                result.push(device.path());
-            }
+            result.push(device.path());
         }
     }
-    return Ok(result);
+    return result;
+}
+
+
+#[allow(dead_code)]
+pub struct TransportNativeHID {
+    device: HidDevice,
+    device_mutex: Mutex<i32>,
 }
 
 impl TransportNativeHID {
-
-    pub fn hid_path(&self) -> String {
-        return self.hid_path.clone();
-    }
 
     fn write_apdu(&self, channel: u16, apdu_command: &[u8]) -> Result<i32, LedgerError> {
         let command_length = apdu_command.len() as usize;
