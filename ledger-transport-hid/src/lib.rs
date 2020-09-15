@@ -110,7 +110,6 @@ impl HidApiWrapper {
     }
 }
 
-
 #[cfg(not(target_os = "linux"))]
 fn device_filter_os_impl(device: &hidapi::DeviceInfo) -> bool {
     return device.usage_page() == LEDGER_USAGE_PAGE;
@@ -145,8 +144,8 @@ fn find_all_ledger_device_paths(api: &hidapi::HidApi) -> Vec<&CStr> {
 
 // Takes a closure that acts on a single ledger, and applies it to all available ledgers
 pub fn with_all_ledgers<Action>(action: &mut Action) -> Result<(), LedgerError>
-    where
-        Action: FnMut(TransportNativeHID) -> Result<(), LedgerError>
+where
+    Action: FnMut(TransportNativeHID) -> Result<(), LedgerError>,
 {
     let apiwrapper = HIDAPIWRAPPER.lock().expect("Could not lock api wrapper");
     let api_mutex = apiwrapper.get().expect("Error getting api_mutex");
@@ -162,18 +161,20 @@ pub fn with_all_ledgers<Action>(action: &mut Action) -> Result<(), LedgerError>
         let _ = action(ledger)?;
     }
     return Ok(());
-        
 }
 
 // Takes a closure that acts on a single ledger, and a filter, and applies the closure to the first
 // ledger for which the filter returns 'true'
 // This function ensures that a ledger cannot never be opened more than once at a time
 // (If it is used recursively, the recursive call should fail with error due to the hidpai lock)
-pub fn with_ledger_matching<Filter, Action, T, E>(filter: Filter, action: &mut Action) -> Result<T, E>
-    where
-        Filter: Fn(&mut TransportNativeHID) -> bool,
-        Action: FnMut(TransportNativeHID) -> Result<T, E>,
-        E: From<LedgerError>
+pub fn with_ledger_matching<Filter, Action, T, E>(
+    filter: Filter,
+    action: &mut Action,
+) -> Result<T, E>
+where
+    Filter: Fn(&mut TransportNativeHID) -> bool,
+    Action: FnMut(TransportNativeHID) -> Result<T, E>,
+    E: From<LedgerError>,
 {
     let apiwrapper = HIDAPIWRAPPER.lock().expect("Could not lock api wrapper");
     let api_mutex = apiwrapper.get().expect("Error getting api_mutex");
@@ -196,9 +197,8 @@ pub fn with_ledger_matching<Filter, Action, T, E>(filter: Filter, action: &mut A
     }
     if let Some(ledger) = desired {
         return action(ledger);
-    }
-    else {
-        return Err(E::from(LedgerError::DeviceNotFound))
+    } else {
+        return Err(E::from(LedgerError::DeviceNotFound));
     }
 }
 
@@ -209,7 +209,6 @@ pub struct TransportNativeHID {
 }
 
 impl TransportNativeHID {
-
     fn write_apdu(&self, channel: u16, apdu_command: &[u8]) -> Result<i32, LedgerError> {
         let command_length = apdu_command.len() as usize;
         let mut in_data = Vec::with_capacity(command_length + 2);
@@ -248,7 +247,12 @@ impl TransportNativeHID {
         Ok(1)
     }
 
-    fn read_apdu(&self, _channel: u16, apdu_answer: &mut Vec<u8>, timeout: Option<i32>) -> Result<usize, LedgerError> {
+    fn read_apdu(
+        &self,
+        _channel: u16,
+        apdu_answer: &mut Vec<u8>,
+        timeout: Option<i32>,
+    ) -> Result<usize, LedgerError> {
         let timeout = timeout.unwrap_or(LEDGER_TIMEOUT);
         let mut buffer = vec![0u8; LEDGER_PACKET_SIZE as usize];
         let mut sequence_idx = 0u16;
@@ -301,7 +305,11 @@ impl TransportNativeHID {
         }
     }
 
-    pub fn exchange(&self, command: &APDUCommand, timeout: Option<i32>) -> Result<APDUAnswer, LedgerError> {
+    pub fn exchange(
+        &self,
+        command: &APDUCommand,
+        timeout: Option<i32>,
+    ) -> Result<APDUAnswer, LedgerError> {
         let _guard = self.device_mutex.lock().unwrap();
 
         self.write_apdu(LEDGER_CHANNEL, &command.serialize())?;
@@ -493,7 +501,9 @@ mod integration_tests {
             data: Vec::new(),
         };
 
-        let result = ledger.exchange(&command, None).expect("Error during exchange");
+        let result = ledger
+            .exchange(&command, None)
+            .expect("Error during exchange");
         debug!("{:?}", result);
     }
 }
