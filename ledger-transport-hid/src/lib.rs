@@ -111,57 +111,6 @@ impl HidApiWrapper {
 }
 
 
-pub fn with_ledgers<Action>(action: &mut Action) -> Result<(), LedgerError>
-    where
-        Action: FnMut(TransportNativeHID) -> Result<(), LedgerError>
-{
-    let apiwrapper = HIDAPIWRAPPER.lock().expect("Could not lock api wrapper");
-    let api_mutex = apiwrapper.get().expect("Error getting api_mutex");
-    let mut api = api_mutex.lock().expect("Could not lock");
-    let _ = api.refresh_devices()?;
-    let device_paths = find_all_ledger_device_paths(&api);
-    for path in device_paths {
-        let device = api.open_path(&path)?;
-        let ledger = TransportNativeHID {
-            device: device,
-            device_mutex: Mutex::new(0),
-        };
-        let _ = action(ledger)?;
-    }
-    return Ok(());
-        
-}
-pub fn with_ledgers_select<Filter, Action, T, E>(filter: Filter, action: &mut Action) -> Result<T, E>
-    where
-        Filter: Fn(&mut TransportNativeHID) -> bool,
-        Action: FnMut(TransportNativeHID) -> Result<T, E>,
-        E: From<LedgerError>
-{
-    let apiwrapper = HIDAPIWRAPPER.lock().expect("Could not lock api wrapper");
-    let api_mutex = apiwrapper.get().expect("Error getting api_mutex");
-    let mut api = api_mutex.lock().expect("Could not lock");
-    let _ = api.refresh_devices().map_err(|e| LedgerError::from(e));
-    let device_paths = find_all_ledger_device_paths(&api);
-
-    let mut desired = None;
-    for path in device_paths {
-        let device = api.open_path(&path).map_err(|e| LedgerError::from(e))?;
-        let mut ledger = TransportNativeHID {
-            device: device,
-            device_mutex: Mutex::new(0),
-        };
-        if filter(&mut ledger) {
-            desired = Some(ledger);
-        }
-    }
-    if let Some(x) = desired {
-        return action(x);
-    }
-    else {
-        return Err(E::from(LedgerError::DeviceNotFound))
-    }
-}
-
 #[cfg(not(target_os = "linux"))]
 fn device_filter_os_impl(device: &hidapi::DeviceInfo) -> bool {
     return device.usage_page() == LEDGER_USAGE_PAGE;
@@ -194,6 +143,64 @@ fn find_all_ledger_device_paths(api: &hidapi::HidApi) -> Vec<&CStr> {
     return result;
 }
 
+// Takes a closure that acts on a single ledger, and applies it to all available ledgers
+pub fn with_all_ledgers<Action>(action: &mut Action) -> Result<(), LedgerError>
+    where
+        Action: FnMut(TransportNativeHID) -> Result<(), LedgerError>
+{
+    let apiwrapper = HIDAPIWRAPPER.lock().expect("Could not lock api wrapper");
+    let api_mutex = apiwrapper.get().expect("Error getting api_mutex");
+    let mut api = api_mutex.lock().expect("Could not lock");
+    let _ = api.refresh_devices()?;
+    let device_paths = find_all_ledger_device_paths(&api);
+    for path in device_paths {
+        let device = api.open_path(&path)?;
+        let ledger = TransportNativeHID {
+            device: device,
+            device_mutex: Mutex::new(0),
+        };
+        let _ = action(ledger)?;
+    }
+    return Ok(());
+        
+}
+
+// Takes a closure that acts on a single ledger, and a filter, and applies the closure to the first
+// ledger for which the filter returns 'true'
+// This function ensures that a ledger cannot never be opened more than once at a time
+// (If it is used recursively, the recursive call should fail with error due to the hidpai lock)
+pub fn with_ledger_matching<Filter, Action, T, E>(filter: Filter, action: &mut Action) -> Result<T, E>
+    where
+        Filter: Fn(&mut TransportNativeHID) -> bool,
+        Action: FnMut(TransportNativeHID) -> Result<T, E>,
+        E: From<LedgerError>
+{
+    let apiwrapper = HIDAPIWRAPPER.lock().expect("Could not lock api wrapper");
+    let api_mutex = apiwrapper.get().expect("Error getting api_mutex");
+    let mut api = api_mutex.lock().expect("Could not lock");
+    let _ = api.refresh_devices().map_err(|e| LedgerError::from(e));
+    let device_paths = find_all_ledger_device_paths(&api);
+
+    let mut desired = None;
+    for path in device_paths {
+        let device = api.open_path(&path).map_err(|e| LedgerError::from(e))?;
+        let mut ledger = TransportNativeHID {
+            device: device,
+            device_mutex: Mutex::new(0),
+        };
+        // Break at first matching elem
+        if filter(&mut ledger) {
+            desired = Some(ledger);
+            break;
+        }
+    }
+    if let Some(ledger) = desired {
+        return action(ledger);
+    }
+    else {
+        return Err(E::from(LedgerError::DeviceNotFound))
+    }
+}
 
 #[allow(dead_code)]
 pub struct TransportNativeHID {
