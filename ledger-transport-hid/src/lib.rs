@@ -19,17 +19,19 @@ extern crate hidapi;
 #[macro_use]
 extern crate serial_test;
 
+mod errors;
+
+use crate::errors::LedgerHIDError;
 use byteorder::{BigEndian, ReadBytesExt};
 use cfg_if::cfg_if;
 use hidapi::HidDevice;
 use lazy_static::lazy_static;
-use ledger_apdu::{map_apdu_error_description, APDUAnswer, APDUCommand, APDUErrorCodes};
-use log::debug;
+use ledger_apdu::{APDUAnswer, APDUCommand};
+use log::info;
 use std::cell::RefCell;
 use std::ffi::CStr;
 use std::io::Cursor;
 use std::sync::{Arc, Mutex, Weak};
-use thiserror::Error;
 
 cfg_if! {
 if #[cfg(target_os = "linux")] {
@@ -52,36 +54,17 @@ const LEDGER_CHANNEL: u16 = 0x0101;
 const LEDGER_PACKET_SIZE: u8 = 64;
 const LEDGER_TIMEOUT: i32 = 10_000_000;
 
-#[derive(Error, Debug)]
-pub enum LedgerError {
-    /// Device not found error
-    #[error("Ledger device not found")]
-    DeviceNotFound,
-    /// Communication error
-    #[error("Ledger device: communication error `{0}`")]
-    Comm(&'static str),
-    /// APDU error
-    #[error("Ledger device: APDU error `{0}`")]
-    APDU(&'static str),
-
-    /// Ioctl error
-    #[error("Ledger device: Ioctl error")]
-    Ioctl(#[from] nix::Error),
-    /// i/o error
-    #[error("Ledger device: i/o error")]
-    Io(#[from] std::io::Error),
-    /// HID error
-    #[error("Ledger device: Io error")]
-    Hid(#[from] hidapi::HidError),
-    /// UT8F error
-    #[error("Ledger device: UTF8 error")]
-    UTF8(#[from] std::str::Utf8Error),
-}
-
 struct HidApiWrapper {
     _api: RefCell<Weak<Mutex<hidapi::HidApi>>>,
 }
 
+#[allow(dead_code)]
+pub struct TransportNativeHID {
+    device: HidDevice,
+    device_mutex: Mutex<i32>,
+}
+
+unsafe impl Sync for TransportNativeHID {}
 unsafe impl Send for HidApiWrapper {}
 
 lazy_static! {
@@ -96,7 +79,7 @@ impl HidApiWrapper {
         }
     }
 
-    fn get(&self) -> Result<Arc<Mutex<hidapi::HidApi>>, LedgerError> {
+    fn get(&self) -> Result<Arc<Mutex<hidapi::HidApi>>, LedgerHIDError> {
         let tmp = self._api.borrow().upgrade();
 
         if let Some(api_mutex) = tmp {
@@ -143,9 +126,9 @@ fn find_all_ledger_device_paths(api: &hidapi::HidApi) -> Vec<&CStr> {
 }
 
 // Takes a closure that acts on a single ledger, and applies it to all available ledgers
-pub fn with_all_ledgers<Action>(action: &mut Action) -> Result<(), LedgerError>
+pub fn with_all_ledgers<Action>(action: &mut Action) -> Result<(), LedgerHIDError>
 where
-    Action: FnMut(TransportNativeHID) -> Result<(), LedgerError>,
+    Action: FnMut(TransportNativeHID) -> Result<(), LedgerHIDError>,
 {
     let apiwrapper = HIDAPIWRAPPER.lock().expect("Could not lock api wrapper");
     let api_mutex = apiwrapper.get().expect("Error getting api_mutex");
@@ -174,17 +157,17 @@ pub fn with_ledger_matching<Filter, Action, T, E>(
 where
     Filter: Fn(&mut TransportNativeHID) -> bool,
     Action: FnMut(TransportNativeHID) -> Result<T, E>,
-    E: From<LedgerError>,
+    E: From<LedgerHIDError>,
 {
     let apiwrapper = HIDAPIWRAPPER.lock().expect("Could not lock api wrapper");
     let api_mutex = apiwrapper.get().expect("Error getting api_mutex");
     let mut api = api_mutex.lock().expect("Could not lock");
-    let _ = api.refresh_devices().map_err(|e| LedgerError::from(e));
+    let _ = api.refresh_devices().map_err(|e| LedgerHIDError::from(e));
     let device_paths = find_all_ledger_device_paths(&api);
 
     let mut desired = None;
     for path in device_paths {
-        let device = api.open_path(&path).map_err(|e| LedgerError::from(e))?;
+        let device = api.open_path(&path).map_err(|e| LedgerHIDError::from(e))?;
         let mut ledger = TransportNativeHID {
             device: device,
             device_mutex: Mutex::new(0),
@@ -198,18 +181,12 @@ where
     if let Some(ledger) = desired {
         return action(ledger);
     } else {
-        return Err(E::from(LedgerError::DeviceNotFound));
+        return Err(E::from(LedgerHIDError::DeviceNotFound));
     }
 }
 
-#[allow(dead_code)]
-pub struct TransportNativeHID {
-    device: HidDevice,
-    device_mutex: Mutex<i32>,
-}
-
 impl TransportNativeHID {
-    fn write_apdu(&self, channel: u16, apdu_command: &[u8]) -> Result<i32, LedgerError> {
+    fn write_apdu(&self, channel: u16, apdu_command: &[u8]) -> Result<i32, LedgerHIDError> {
         let command_length = apdu_command.len() as usize;
         let mut in_data = Vec::with_capacity(command_length + 2);
         in_data.push(((command_length >> 8) & 0xFF) as u8);
@@ -229,19 +206,19 @@ impl TransportNativeHID {
             buffer[4] = (sequence_idx & 0xFF) as u8; // sequence_idx big endian
             buffer[5..5 + chunk.len()].copy_from_slice(chunk);
 
-            debug!("[{:3}] << {:}", buffer.len(), hex::encode(&buffer));
+            info!("[{:3}] << {:}", buffer.len(), hex::encode(&buffer));
 
             let result = self.device.write(&buffer);
 
             match result {
                 Ok(size) => {
                     if size < buffer.len() {
-                        return Err(LedgerError::Comm(
+                        return Err(LedgerHIDError::Comm(
                             "USB write error. Could not send whole message",
                         ));
                     }
                 }
-                Err(x) => return Err(LedgerError::Hid(x)),
+                Err(x) => return Err(LedgerHIDError::Hid(x)),
             }
         }
         Ok(1)
@@ -252,7 +229,7 @@ impl TransportNativeHID {
         _channel: u16,
         apdu_answer: &mut Vec<u8>,
         timeout: Option<i32>,
-    ) -> Result<usize, LedgerError> {
+    ) -> Result<usize, LedgerHIDError> {
         let timeout = timeout.unwrap_or(LEDGER_TIMEOUT);
         let mut buffer = vec![0u8; LEDGER_PACKET_SIZE as usize];
         let mut sequence_idx = 0u16;
@@ -262,7 +239,7 @@ impl TransportNativeHID {
             let res = self.device.read_timeout(&mut buffer, timeout)?;
 
             if (sequence_idx == 0 && res < 7) || res < 5 {
-                return Err(LedgerError::Comm("Read error. Incomplete header"));
+                return Err(LedgerHIDError::Comm("Read error. Incomplete header"));
             }
 
             let mut rdr = Cursor::new(&buffer);
@@ -280,7 +257,7 @@ impl TransportNativeHID {
             //        }
 
             if rcv_seq_idx != sequence_idx {
-                return Err(LedgerError::Comm("Invalid sequence idx"));
+                return Err(LedgerHIDError::Comm("Invalid sequence idx"));
             }
 
             if rcv_seq_idx == 0 {
@@ -293,7 +270,7 @@ impl TransportNativeHID {
 
             let new_chunk = &buffer[rdr.position() as usize..end_p];
 
-            debug!("[{:3}] << {:}", new_chunk.len(), hex::encode(&new_chunk));
+            info!("[{:3}] << {:}", new_chunk.len(), hex::encode(&new_chunk));
 
             apdu_answer.extend_from_slice(new_chunk);
 
@@ -309,7 +286,7 @@ impl TransportNativeHID {
         &self,
         command: &APDUCommand,
         timeout: Option<i32>,
-    ) -> Result<APDUAnswer, LedgerError> {
+    ) -> Result<APDUAnswer, LedgerHIDError> {
         let _guard = self.device_mutex.lock().unwrap();
 
         self.write_apdu(LEDGER_CHANNEL, &command.serialize())?;
@@ -318,18 +295,10 @@ impl TransportNativeHID {
         let res = self.read_apdu(LEDGER_CHANNEL, &mut answer, timeout)?;
 
         if res < 2 {
-            return Err(LedgerError::Comm("response was too short"));
+            return Err(LedgerHIDError::Comm("response was too short"));
         }
 
-        let apdu_answer = APDUAnswer::from_answer(answer);
-
-        if apdu_answer.retcode != APDUErrorCodes::NoError as u16 {
-            return Err(LedgerError::APDU(map_apdu_error_description(
-                apdu_answer.retcode,
-            )));
-        }
-
-        Ok(apdu_answer)
+        Ok(APDUAnswer::from_answer(answer))
     }
 
     pub fn close() {
@@ -347,7 +316,7 @@ if #[cfg(target_os = "linux")] {
         value: [u8; HID_MAX_DESCRIPTOR_SIZE],
     }
 
-    fn get_usage_page(device_path: &CStr) -> Result<u16, LedgerError>
+    fn get_usage_page(device_path: &CStr) -> Result<u16, LedgerHIDError>
     {
         // #define HIDIOCGRDESCSIZE	_IOR('H', 0x01, int)
         // #define HIDIOCGRDESC		_IOR('H', 0x02, struct HidrawReportDescriptor)
@@ -420,8 +389,8 @@ if #[cfg(target_os = "linux")] {
 
 #[cfg(test)]
 mod integration_tests {
-    use crate::{APDUCommand, TransportNativeHID, HIDAPIWRAPPER};
-    use log::debug;
+    use crate::{APDUCommand, TransportNativeHID, HIDAPIWRAPPER, with_all_ledgers};
+    use log::info;
     use serial_test;
 
     fn init_logging() {
@@ -437,7 +406,7 @@ mod integration_tests {
         let api = api_mutex.lock().expect("Could not lock");
 
         for device_info in api.device_list() {
-            debug!(
+            info!(
                 "{:#?} - {:#x}/{:#x}/{:#x}/{:#x} {:#} {:#}",
                 device_info.path(),
                 device_info.vendor_id(),
@@ -460,8 +429,8 @@ mod integration_tests {
 
         // TODO: Extend to discover two devices
         let ledger_path =
-            TransportNativeHID::find_ledger_device_path(&api).expect("Could not find a device");
-        debug!("{:?}", ledger_path);
+            super::find_all_ledger_device_paths(&api).pop().expect("Could not find a device");
+        info!("{:?}", ledger_path);
     }
 
     #[test]
@@ -489,21 +458,30 @@ mod integration_tests {
     fn exchange() {
         init_logging();
 
-        let ledger = TransportNativeHID::new().expect("Could not get a device");
+        let mut found_one = false;
+        with_all_ledgers(&mut |mut ledger: TransportNativeHID| {
+            found_one |= true;
 
-        // use app info command that works on almost any app
-        // including dashboard
-        let command = APDUCommand {
-            cla: 0xb0,
-            ins: 0x01,
-            p1: 0x00,
-            p2: 0x00,
-            data: Vec::new(),
-        };
+            // use app info command that works on almost any app
+            // including dashboard
+            let command = APDUCommand {
+                cla: 0xb0,
+                ins: 0x01,
+                p1: 0x00,
+                p2: 0x00,
+                data: Vec::new(),
+            };
 
-        let result = ledger
-            .exchange(&command, None)
-            .expect("Error during exchange");
-        debug!("{:?}", result);
+            let result = ledger
+                .exchange(&command, None)
+                .expect("Error during exchange");
+            info!("{:?}", result);
+
+            Ok(())
+        });
+
+        if !found_one {
+            panic!("Could not get a device");
+        }
     }
 }
