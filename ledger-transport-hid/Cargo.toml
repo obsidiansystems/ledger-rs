@@ -32,7 +32,7 @@ log = "0.4"
 nix = "0.17"
 
 [dependencies.hidapi]
-version = "1.2"
+version = "1.2.3"
 default-features = false
 features=["linux-static-hidraw"]
 

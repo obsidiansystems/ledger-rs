@@ -13,6 +13,7 @@
 *  See the License for the specific language governing permissions and
 *  limitations under the License.
 ********************************************************************************/
+use std::fmt;
 
 #[derive(Debug)]
 pub struct APDUCommand {
@@ -21,6 +22,13 @@ pub struct APDUCommand {
     pub p1: u8,
     pub p2: u8,
     pub data: Vec<u8>,
+}
+
+impl fmt::Display for APDUCommand {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        write!(f, "APDUCommand [ {:02x?} {:02x?} {:02x?} {:02x?} {:02x?} {:02x?} ]", 
+               self.cla, self.ins, self.p1, self.p2, self.data.len(), self.data)
+    }
 }
 
 #[derive(Debug)]

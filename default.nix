@@ -1,7 +1,7 @@
 { pkgs ? import <nixpkgs> {} }:
 pkgs.rustPlatform.buildRustPackage {
   name = "ledger-rs";
-  src = ./.;
+  src = pkgs.lib.cleanSource ./.;
   # Requires that the ledger is plugged in, so turn tests off
   doCheck = false;
   nativeBuildInputs = [ pkgs.pkgconfig ];
@@ -9,6 +9,7 @@ pkgs.rustPlatform.buildRustPackage {
   verifyCargoDeps = false;
 
   # Cargo hash must be updated when Cargo.lock file changes.
-  cargoSha256 = "08vz4nx25rrqnc7plzzv12bxvvl6d5lvzcnkvq2haw1r5rw41irm";
+  # cargoSha256 = pkgs.lib.fakeSha256;
+  cargoSha256 = "sha256:12sqyhz90ga77hz4lw9aqmp320b9n8l4w67gn2fqk9p8lzcz5ydc";
 }
 
